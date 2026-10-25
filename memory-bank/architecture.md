@@ -4,7 +4,7 @@
 
 - 요구사항 기준: 프로젝트 루트의 `prompt_draft.md`.
 - 화면 구성 참고: `ui_plan.png`. 실제 UI 구현 전에 이미지를 확인한다.
-- 2026-10-24 현재 앱 코드, 패키지 설정, Supabase 설정은 없다. 아래 구조와 데이터 모델은 구현을 위한 제안이며 구현 완료 상태를 의미하지 않는다.
+- 2026-10-25: Next.js App Router 기반 UI와 Supabase 연동 코드를 구현했다. 실제 외부 Supabase 적용·연결 검증은 미완료다.
 
 ## 제품 범위
 
@@ -12,14 +12,14 @@
 
 ## 기술 구성과 책임
 
-- Next.js + TypeScript: 화면, 라우팅, 데이터 접근과 타입 관리. App Router 사용을 제안한다.
-- Tailwind CSS: 흰색 배경, 얇은 테두리, 이미지 중심 레이아웃과 반응형 스타일.
+- Next.js 16 + React 19 + TypeScript: App Router로 화면과 라우팅, 데이터 접근을 관리한다.
+- Tailwind CSS 4 및 globals.css: 아이보리 배경, 세이지 그린, 얇은 테두리와 반응형 카드 레이아웃. 참고 이미지의 작성·목록·상세 구성을 유지하고 따뜻한 종이 느낌으로 확장했다.
 - 브라우저 Canvas 및 Pointer Events: 사진 합성, 마우스·터치 필기, 초기화, 이미지 내보내기. 캔버스는 클라이언트에서 처리한다.
 - Supabase Database: 방명록 메타데이터와 댓글, 제약 조건, 인덱스, RLS.
 - Supabase Storage: 최종 합성 이미지 저장과 읽기 정책.
 - Supabase Realtime: 방명록 목록과 선택한 방명록 댓글의 신규 등록 이벤트 전달.
 
-## 제안 화면 및 코드 구조
+## 구현 화면 및 코드 구조
 
 | 경로 | 역할 |
 | --- | --- |
@@ -27,16 +27,16 @@
 | `/write` | 전자 방명록 제목, 캔버스, 사진 첨부·지우기·등록 |
 | `/guestbooks/[id]` | 방명록 이미지, 댓글 목록, 닉네임·댓글 입력, 목록 이동 |
 
-`src/app`에 화면, `src/components`에 캔버스·카드·댓글 UI, `src/lib`에 Supabase 클라이언트·검증·상대 시간 처리를 둔다. SQL 마이그레이션은 `supabase/migrations`에서 관리한다. 구체적인 파일 분리는 구현 시 확정한다.
+`src/app`에 세 라우트와 공통 레이아웃, `src/components/guestbook.tsx`에 캔버스·카드·댓글 UI와 상태, 검증, 상대 시간 처리를 둔다. `src/lib/supabase.ts`는 공개 클라이언트를 생성한다. SQL은 `supabase/migrations`에서 관리한다. 목록에서는 작성·상세를 모달로 열고 직접 URL 진입도 지원한다.
 
-## 제안 데이터 모델
+## 구현 데이터 모델 (SQL 적용 전)
 
 | 테이블 | 주요 컬럼 | 제약 및 인덱스 |
 | --- | --- | --- |
 | `guestbooks` | `id` UUID, `image_path` text, `created_at` timestamptz | 기본 키, 필수 이미지 경로, 최신순 조회 인덱스 `(created_at, id)` |
 | `comments` | `id` UUID, `guestbook_id` UUID, `nickname` text, `content` text, `created_at` timestamptz | 기본 키, 방명록 외래 키, 공백·길이 검증, 조회 인덱스 `(guestbook_id, created_at, id)` |
 
-시간은 DB에서 생성하고 저장 경로는 고유 ID로 생성한다. 댓글 정렬은 작성순을 제안한다. 방명록 삭제 기능은 초기 범위에 없으며, 외래 키 삭제 동작은 SQL 작성 시 명시한다.
+방명록 시간은 DB 기본값을 사용한다. 댓글은 클라이언트 시간을 전달하며 작성순으로 조회한다. 이미지 파일 이름은 UUID.png, image_path에는 공개 URL을 저장한다. 방명록 삭제 UI는 없으며 댓글 외래 키는 ON DELETE CASCADE다.
 
 ## 주요 데이터 흐름
 
@@ -60,6 +60,11 @@
 
 데스크톱과 모바일을 지원하며 캔버스 필기 중 페이지 스크롤 간섭을 제어한다. 로딩·빈 목록·조회 실패·저장 실패·존재하지 않는 상세 항목을 표시한다. 환경 변수 예시, Supabase 마이그레이션·Storage·Realtime 설정, 두 브라우저 검증 절차를 구현 후 문서화한다.
 
-## 구현 시 확정할 사항
+## 확정한 구현 결정과 남은 사항
 
-패키지 버전, 입력 제한 수치, 버킷 공개 여부와 이미지 URL 방식, 직접 업로드와 서버 경유 저장의 경계, 실패 파일 정리 방식, 실제 배포 환경은 아직 확정하지 않았다. 결정 시 이 문서와 구현 계획을 함께 갱신한다.
+- URL·publishable key가 없으면 예시 6개와 localStorage 데모를 제공한다. 실제 Realtime과 혼동하지 않도록 연결 상태를 표시한다. storage 이벤트로 같은 브라우저의 탭을 동기화한다.
+- 고정 1000×620 Canvas를 CSS로 축소하여 화면 크기가 달라져도 내용을 보존하고 좌표를 환산한다. Pointer Events와 touch-action:none을 사용한다.
+- 원본 PNG/JPEG/WebP 최대 5MB, 최종 PNG 최대 5MB, 닉네임 1~20자, 댓글 1~500자. 공개 Storage 버킷에 직접 업로드한다.
+- 공개 수정·삭제 권한은 제공하지 않는다. DB 실패 후 고아 파일은 관리자 정기 정리 대상으로 README에 기록했다. 자동 정리는 미구현이다.
+- 목록 최대 100개. 최초 구독 완료·재연결 시 재조회하고 ID로 병합한다. 댓글 구독은 상세 ID로 제한하고 해제한다. 상대 시간은 1분 간격 갱신한다.
+- 실제 배포, 요청 제한, 외부 Supabase 정책 검증, 브라우저 간 통합 검증은 후속 작업이다.
