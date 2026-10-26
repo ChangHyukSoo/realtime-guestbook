@@ -35,3 +35,9 @@
 - 목록은 최신 100개까지 조회하며 페이지네이션은 없다.
 - 모달의 키보드 포커스 트랩은 후속 접근성 개선 항목이다.
 - 다음 단계는 실제 환경 변수 설정·SQL 적용 후 README의 두 브라우저 검증 절차 수행이다.
+# Supabase MCP check (2026-10-26)
+
+- Confirmed 20 registered Supabase MCP tools. Read-only calls to get_project_url and list_tables succeeded.
+- Remote public schema currently contains public.guestbook (0 rows, RLS disabled). This differs from the planned guestbooks/comments schema; no remote changes were applied.
+- App integration, Storage policies, and Realtime behavior remain unverified. Review the existing schema and RLS policies before applying the project migration.
+
