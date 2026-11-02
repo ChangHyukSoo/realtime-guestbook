@@ -1,2 +1,3 @@
 import Guestbook from '@/components/guestbook';
-export default function Page() { return <Guestbook />; }
+import { requireMember } from '@/lib/member';
+export default async function Page() { const member = await requireMember(); return <Guestbook {...member} />; }

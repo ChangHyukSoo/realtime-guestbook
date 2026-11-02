@@ -1,70 +1,78 @@
 # 아키텍처
 
-## 기준과 현재 상태
+## 사용자 프로필 구현 (2026-10-28, 현재 상태)
 
-- 요구사항 기준: 프로젝트 루트의 `prompt_draft.md`.
-- 화면 구성 참고: `ui_plan.png`. 실제 UI 구현 전에 이미지를 확인한다.
-- 2026-10-25: Next.js App Router 기반 UI와 Supabase 연동 코드를 구현했다. 실제 외부 Supabase 적용·연결 검증은 미완료다.
+이 절은 아래 2026-10-27 기록 중 프로필 구조·가입 닉네임·원격 적용 상태를 대체한다.
 
-## 제품 범위
+- `/profile`은 Proxy와 `requireMember('/profile')`로 보호한다. 헤더의 닉네임을 눌러 PC·모바일에서 진입하며, 이동 전에 방명록 초안을 보존한다. `safeNext()`에 `/profile`을 추가했다.
+- `profiles`에 `avatar_path`를 추가했다. 회원은 표시용 프로필을 조회하고 자신의 nickname/avatar_path만 수정한다. 이메일은 공개 프로필에 포함하지 않는다. 닉네임은 기존 1~20자 규칙과 `lower(btrim(nickname))` UNIQUE 인덱스로 중복을 제한한다.
+- 가입 폼의 닉네임 입력을 제거했다. DB 가입 트리거가 이메일 아이디(최대 20자)로 기본 프로필을 생성한다. 중복 시 UID 기반 접미사를 붙이며 기존 닉네임은 변경하지 않는다.
+- 프로필 저장 Server Action은 `getUser()`와 이메일 확인 상태를 검사하고, 파일의 5MiB 제한·MIME·시그니처를 검사한다. private `profile-avatars/<uid>/<uuid>.<ext>`에 업로드한 뒤 프로필을 갱신한다. Storage 버킷도 5MiB/PNG/JPEG/WebP를 제한한다. 직접 API 요청에도 RLS·경로 제약·소유 이미지 검증 트리거가 적용된다.
+- 이미지 URL은 DB에 저장하지 않는다. 목록·상세·댓글의 `AuthorProfile`이 5분 서명 URL을 발급하고 4분마다 갱신한다. 프로필은 처음 진입·창 포커스·30초 주기로 갱신한다. 프로필 없는 기존 작성자는 이전 방문자/댓글 스냅샷과 기본 아바타로 표시한다.
+- 프로필 갱신 성공 후 이전 이미지를 삭제한다. 참조 중인 이미지는 삭제 정책이 보호한다. 업로드 후 DB 응답이 유실된 경우 새 이미지를 삭제하지 않는다. 고아 이미지 운영 기준은 trouble-shooting.md에 기록했다.
+- `202610280001_user_profile.sql`은 PGlite 검증 후 Supabase MCP로 원격 적용했다. 적용 전 기존 닉네임 중복 0건을 확인했고 적용 후 avatar_path 컬럼을 확인했다. 실제 사용자 계정으로 원격 업로드·인증 전체 흐름을 검증한 것은 아니다.
 
-로그인 없이 사용하는 실시간 전자 방명록이다. 마우스 또는 터치로 캔버스에 그림과 손글씨를 작성하고 사진 위에도 그릴 수 있다. 완성된 이미지를 저장해 목록에서 보여주며, 상세 화면에서 닉네임과 댓글을 등록한다. 방명록과 댓글은 다른 사용자의 화면에도 새로고침 없이 반영한다.
+최종 갱신: 2026-10-27. 요구사항은 `prompt_draft.md`의 변경 이력, 인증·이전 기준은 [인증 계획](auth-migration-plan.md)을 따른다. `ui_plan.png`는 기존 작성·목록·상세 화면 참고 자료다.
 
-## 기술 구성과 책임
+## 제품과 구현 상태
 
-- Next.js 16 + React 19 + TypeScript: App Router로 화면과 라우팅, 데이터 접근을 관리한다.
-- Tailwind CSS 4 및 globals.css: 아이보리 배경, 세이지 그린, 얇은 테두리와 반응형 카드 레이아웃. 참고 이미지의 작성·목록·상세 구성을 유지하고 따뜻한 종이 느낌으로 확장했다.
-- 브라우저 Canvas 및 Pointer Events: 사진 합성, 마우스·터치 필기, 초기화, 이미지 내보내기. 캔버스는 클라이언트에서 처리한다.
-- Supabase Database: 방명록 메타데이터와 댓글, 제약 조건, 인덱스, RLS.
-- Supabase Storage: 최종 합성 이미지 저장과 읽기 정책.
-- Supabase Realtime: 방명록 목록과 선택한 방명록 댓글의 신규 등록 이벤트 전달.
+회원가입·로그인에서 시작하는 실시간 전자방명록이다. 이메일 확인 후 로그인하여 캔버스 필기·사진 합성, 이미지 등록·목록·상세와 계정 닉네임 댓글을 이용한다. 기존 로그인 없는 이용과 익명 인증 제안은 사용자 지시로 대체되었다.
 
-## 구현 화면 및 코드 구조
+애플리케이션·후속 SQL·이전 스크립트는 구현하고 로컬 검증했다. 원격은 2026-10-27 읽기 전용 조회만 수행했으며 후속 SQL·이미지 이전·Auth 설정·실제 메일/Realtime 검증은 미완료다. 코드가 기대하는 회원 스키마가 아직 원격에 없으므로 운영 전환 전에 README 순서를 따라야 한다.
 
-| 경로 | 역할 |
+## 기술과 파일 책임
+
+- Next.js 16 App Router / React 19 / TypeScript / Tailwind CSS 4. 아이보리·세이지 테마와 반응형 폼·그리드를 사용한다.
+- `src/components/auth-form.tsx`: 로그인·가입·메일 재발송·비밀번호 찾기/변경 UI, 제출 잠금·오류·이메일/닉네임 보존. 비밀번호는 영속화하지 않는다.
+- `src/app/auth/actions.ts`: Server Action 입력 검증과 Supabase Auth 호출. 서버에 비밀번호를 별도 저장하지 않는다. 메일 링크의 사이트 주소는 운영 환경 변수로 고정한다.
+- `src/lib/supabase/client.ts`, `server.ts`: SSR 패키지의 쿠키 기반 브라우저/요청별 서버 클라이언트. 기존 `src/lib/supabase.ts`는 브라우저 클라이언트의 호환 export다.
+- `src/proxy.ts`: 쿠키 갱신과 기본 리다이렉트, 캐시 금지. `src/lib/member.ts`의 `requireMember()`가 각 보호 페이지에서 검증된 사용자와 프로필을 다시 조회한다. 라우트 그룹 이동 대신 기존 URL의 페이지별 가드를 재사용했다.
+- `src/app/auth/confirm/route.ts`: signup/recovery 유형과 token hash를 검증하고 상대 내부 경로로 이동한다. 복구 시 HttpOnly/SameSite 쿠키를 10분 발급한다. 재설정 화면과 Action 모두 사용자·쿠키를 확인한다.
+- `src/components/guestbook.tsx`: 기존 캔버스·그리드·상세·댓글·조회/저장/구독을 재사용한다. 회원 UID·프로필 닉네임을 서버 props로 전달받되 실제 인가는 RLS/트리거가 수행한다.
+- `supabase/migrations`: 최초 기반 SQL과 회원 확장→이전 확인→정책 강제의 후속 SQL 세 개. 원격에는 아직 적용하지 않았다.
+- `scripts/migrate-images.mjs`, `cleanup-orphans.mjs`: 서버 전용 키로 실행하는 기본 dry-run 운영 도구. `backups/`는 git 제외다.
+
+## 라우트
+
+| 경로 | 접근과 역할 |
 | --- | --- |
-| `/` | 최신순 방명록 카드 그리드, 새 방명록 작성 버튼 |
-| `/write` | 전자 방명록 제목, 캔버스, 사진 첨부·지우기·등록 |
-| `/guestbooks/[id]` | 방명록 이미지, 댓글 목록, 닉네임·댓글 입력, 목록 이동 |
+| `/login`, `/signup` | 비로그인 인증 UI, 회원은 목록으로 이동 |
+| `/signup/check-email`, `/forgot-password` | 이메일 확인 안내·재발송 및 복구 요청 |
+| `/auth/confirm` | 서버 확인 링크 처리, 공개 진입 가능 |
+| `/reset-password` | 검증된 회원과 복구 쿠키 필요 |
+| `/`, `/write`, `/guestbooks/[id]` | 이메일 확인된 비익명 회원만 접근 |
 
-`src/app`에 세 라우트와 공통 레이아웃, `src/components/guestbook.tsx`에 캔버스·카드·댓글 UI와 상태, 검증, 상대 시간 처리를 둔다. `src/lib/supabase.ts`는 공개 클라이언트를 생성한다. SQL은 `supabase/migrations`에서 관리한다. 목록에서는 작성·상세를 모달로 열고 직접 URL 진입도 지원한다.
+`safeNext()`는 `/`, `/write`, UUID 상세 경로만 허용한다. 서버 Actions의 쿠키 변경은 Next.js 출처 검증을 사용하며 데이터 RLS는 별도로 적용한다. 로그인 상태를 공유 캐시에 저장하지 않는다.
 
-## 구현 데이터 모델 (SQL 적용 전)
+## 목표 데이터 모델 (SQL 작성·로컬 검증 완료, 원격 적용 전)
 
-| 테이블 | 주요 컬럼 | 제약 및 인덱스 |
-| --- | --- | --- |
-| `guestbooks` | `id` UUID, `image_path` text, `created_at` timestamptz | 기본 키, 필수 이미지 경로, 최신순 조회 인덱스 `(created_at, id)` |
-| `comments` | `id` UUID, `guestbook_id` UUID, `nickname` text, `content` text, `created_at` timestamptz | 기본 키, 방명록 외래 키, 공백·길이 검증, 조회 인덱스 `(guestbook_id, created_at, id)` |
+| 테이블 | 주요 필드와 규칙 |
+| --- | --- |
+| `profiles` | auth.users FK `id`, nickname 1~20자, created_at. 가입 트리거 생성, 본인 SELECT만 허용 |
+| `guestbooks` | UUID id, nullable author_id, image_object_path, 호환용 nullable image_path, created_at. 신규 행은 UID/객체 소유권 검증 |
+| `comments` | UUID id, guestbook_id FK cascade, nullable author_id, nickname snapshot, content 1~500자, created_at |
 
-방명록 시간은 DB 기본값을 사용한다. 댓글은 클라이언트 시간을 전달하며 작성순으로 조회한다. 이미지 파일 이름은 UUID.png, image_path에는 공개 URL을 저장한다. 방명록 삭제 UI는 없으며 댓글 외래 키는 ON DELETE CASCADE다.
+기존 author_id는 NULL로 유지하고 가입자의 닉네임으로 자동 귀속시키지 않는다. 새 행은 `auth.uid()`와 일치해야 한다. auth.users 삭제 시 콘텐츠 작성자는 NULL로 남는 보존 정책이며 탈퇴 기능은 별도 범위다. 닉네임은 가입 메타데이터에서 길이를 검증해 프로필에 기록하고 댓글 INSERT 때 DB가 프로필 스냅샷으로 강제한다. 작성 시간도 DB가 강제한다.
 
-## 주요 데이터 흐름
+기본 조회 인덱스와 author_id 인덱스, 이미지 경로 unique 인덱스를 둔다. 회원은 타 회원 콘텐츠도 조회할 수 있으므로 author_id는 회원 간 활동 연결 정보가 될 수 있다. 이메일은 public 모델에 저장하지 않는다.
 
-1. 사진을 검증해 캔버스에 배치하고 그 위에 필기를 합성한다. 고해상도 화면과 캔버스 크기 변경 시 좌표 및 내용 보존을 고려한다.
-2. 사진 또는 필기의 존재 여부로 빈 캔버스를 검사한다. 지우기는 사진과 필기를 모두 초기화한다.
-3. 등록 시 최종 이미지를 Blob으로 내보내고 Storage에 업로드한 뒤 `guestbooks`에 경로를 기록한다. 저장 중에는 중복 제출을 막고 성공 후 목록으로 이동한다.
-4. 업로드 또는 DB 저장 실패 시 캔버스를 유지한다. Storage와 DB는 단일 트랜잭션이 아니므로 DB 저장 실패 시 고아 파일 정리 방법을 마련한다. 공개 삭제 권한을 넓히지 않고 서버 경유 정리 또는 관리용 정리 절차를 검토한다.
-5. 목록은 최초 조회와 Realtime 구독을 결합한다. 구독 준비와 최초 조회 사이의 누락을 방지하고, UUID 기준 병합으로 중복 표시를 막는다. 재연결 시 재조회한다.
-6. 댓글 저장 후 결과와 Realtime 이벤트를 UUID 기준으로 병합한다. 댓글 구독은 현재 `guestbook_id`로 제한하고 화면 이탈 시 모든 구독을 해제한다.
-7. 댓글 작성 시간은 ‘방금 전’, ‘1분 전’ 등 상대 시간으로 표시하고 시간이 흐르면 갱신한다.
+## 인가와 저장 흐름
 
-## 접근 정책과 검증
+1. 미인증과 익명 Auth는 테이블·Storage 접근을 차단한다. 회원은 SELECT/INSERT만 허용하고 사용자 UPDATE/DELETE 및 소유권 변경은 차단한다. 기존 공개 정책과 GRANT는 최종 SQL이 제거한다.
+2. 등록 전 `getUser()`로 동일 회원을 확인한다. PNG 최대 5MB를 private 버킷의 `<uid>/<entry-id>.png`에 업로드하고 DB에 객체 키를 기록한다. DB 트리거가 경로·객체 존재·owner_id를 확인한다.
+3. Storage와 DB는 단일 트랜잭션이 아니다. 같은 작성 내용의 재시도는 ID를 유지하고 기존 행을 먼저 확인한다. 내용을 바꾸면 새 ID를 사용한다. 실패한 업로드의 고아 객체는 24시간 유예 후 쓰기 중지 시간의 운영 스크립트로 정리한다.
+4. 이미지 표시에는 5분 서명 URL을 사용하고 4분마다 갱신한다. DB/Realtime에는 URL을 저장하지 않는다. 원격 이전 전의 공개 URL로 자동 폴백하지 않는다. 기존 이미지는 private `legacy/<id>.png`로 복사·체크섬 대조 후 참조를 갱신한다.
+5. 회원 콘텐츠 등록은 계정별 직렬화 잠금과 분당 방명록 5개/댓글 20개 제한을 적용한다. Storage INSERT는 본인 폴더·소유자·파일명과 분당 업로드 10개를 확인한다. Auth/IP 남용 설정은 외부 검증 항목이다.
+6. 목록 최대 100개, 상세 직접 진입은 해당 ID를 추가 조회한다. Realtime INSERT를 ID로 병합하고 구독 완료·재연결 시 재조회한다. 상세 필터 및 구독 해제를 유지하며 로그인 토큰 갱신을 전달한다. 로그아웃·계정 전환 때 구독과 콘텐츠를 비운다.
+7. 현재 캔버스·댓글은 저장 실패 시 유지한다. 탭 sessionStorage에 UID별 초안을 보존하고 동일 계정 재로그인 시 복원한다. 저장소가 가득 찼거나 사용할 수 없으면 이동하지 않고 현재 내용을 유지하며 새 탭 재로그인을 안내한다. 동일 계정 재확인 후 원래 탭의 저장·구독을 복구한다. 다른 계정에 자동 제출하지 않는다. 탭 종료에 따른 복구 제약은 README에 기록했다.
 
-- 로그인 없는 이용을 위한 공개 읽기·신규 등록 정책을 명시적으로 정의한다. 수정·삭제는 초기 사용자 기능에 포함하지 않는다.
-- 두 테이블 모두 RLS를 활성화하고 필요한 권한만 허용한다. Storage 버킷에도 읽기·업로드 정책, 파일 형식·용량 제한을 적용한다.
-- 클라이언트에는 공개용 Supabase URL과 publishable key 또는 anon key만 사용한다. 관리자 키가 필요하면 서버 전용으로 관리한다.
-- 사진의 허용 MIME 유형과 최대 크기, 최종 이미지 최대 크기, 닉네임·댓글 길이의 실제 수치는 구현 시 상수·DB 제약·Storage 설정에 일관되게 확정한다. 초안에 수치가 정해져 있지는 않다.
-- 닉네임과 댓글은 공백 입력을 거부하고 댓글은 텍스트로 렌더링한다. 입력 검증은 클라이언트뿐 아니라 DB·Storage 또는 서버 경계에서도 적용한다.
+## 원격 현황과 배포 경계
 
-## 사용성과 운영
+원격 재조회에서 `guestbooks` 1행·`comments` 2행·공개 이미지 1개·Auth 사용자 0명, migration 이력 0개를 확인했다. 별도 `public.guestbook`은 0행이고 RLS가 꺼져 있다. 사용처 확인 없이 자동 변경하지 않는다.
 
-데스크톱과 모바일을 지원하며 캔버스 필기 중 페이지 스크롤 간섭을 제어한다. 로딩·빈 목록·조회 실패·저장 실패·존재하지 않는 상세 항목을 표시한다. 환경 변수 예시, Supabase 마이그레이션·Storage·Realtime 설정, 두 브라우저 검증 절차를 구현 후 문서화한다.
+확장 SQL부터 옛 비회원 쓰기가 차단되므로 전체 백업·스테이징 검증 후 쓰기 중지 시간에 전환한다. 실제 이미지 이전에 필요한 서버 전용 키와 전체 백업이 현재 없어 원격은 변경하지 않았다. PGlite/HTTP fixture 테스트는 호스팅된 Auth·SMTP·Storage·Realtime 검증을 대체하지 않는다.
 
-## 확정한 구현 결정과 남은 사항
+## Spec Kit integration (2026-10-29)
 
-- URL·publishable key가 없으면 예시 6개와 localStorage 데모를 제공한다. 실제 Realtime과 혼동하지 않도록 연결 상태를 표시한다. storage 이벤트로 같은 브라우저의 탭을 동기화한다.
-- 고정 1000×620 Canvas를 CSS로 축소하여 화면 크기가 달라져도 내용을 보존하고 좌표를 환산한다. Pointer Events와 touch-action:none을 사용한다.
-- 원본 PNG/JPEG/WebP 최대 5MB, 최종 PNG 최대 5MB, 닉네임 1~20자, 댓글 1~500자. 공개 Storage 버킷에 직접 업로드한다.
-- 공개 수정·삭제 권한은 제공하지 않는다. DB 실패 후 고아 파일은 관리자 정기 정리 대상으로 README에 기록했다. 자동 정리는 미구현이다.
-- 목록 최대 100개. 최초 구독 완료·재연결 시 재조회하고 ID로 병합한다. 댓글 구독은 상세 ID로 제한하고 해제한다. 상대 시간은 1분 간격 갱신한다.
-- 실제 배포, 요청 제한, 외부 Supabase 정책 검증, 브라우저 간 통합 검증은 후속 작업이다.
+- Installed specify-cli version: 1.2.6.dev0; Codex integration uses .agents/skills/speckit-<name>/SKILL.md.
+- This installed integration deprecates legacy commands and defaults to skills; absence of .codex/prompts is expected. No compatibility copies were added.
