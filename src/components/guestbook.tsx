@@ -32,12 +32,39 @@ function relative(date: string) { const minutes = Math.max(0, Math.floor((Date.n
 export default function Guestbook({ initialWrite = false, initialId, userId, nickname: profileNickname }: { initialWrite?: boolean; initialId?: string; userId: string; nickname?: string }) {
   const [profiles, setProfiles] = useState<Record<string, Author>>({});
   useEffect(() => {
-    if (!supabase) return; const client = supabase; let active = true;
-    const refresh = async () => { const { data } = await client.from('profiles').select('id,nickname,avatar_path'); if (active && data) setProfiles(Object.fromEntries(data.map(p => [p.id,p]))); };
-    void refresh(); const timer = setInterval(() => void refresh(), 30000);
-    const focus = () => void refresh(); window.addEventListener('focus',focus);
-    return () => { active=false; clearInterval(timer); window.removeEventListener('focus',focus); };
-  }, []);
+    if (!supabase) return;
+    const client = supabase;
+    let active=true, paused=false, inFlight=false, queued=false, generation=0;
+    let controller: AbortController | null=null;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    let wake: ReturnType<typeof setTimeout> | undefined;
+    const refresh = async (force=false) => {
+      if(!active || paused || document.hidden || !navigator.onLine) return;
+      if(inFlight) {if(force) queued=true;return;}
+      inFlight=true;
+      const version=generation;
+      controller=new AbortController();
+      const timeout=setTimeout(()=>controller?.abort(),10000);
+      try {
+        const {data,error}=await client.from('profiles').select('id,nickname,avatar_path').abortSignal(controller.signal);
+        if(active && !paused && version===generation && !queued) setProfiles(!error&&data?Object.fromEntries(data.map(p=>[p.id,p])):{});
+      } catch {if(active&&!paused&&version===generation&&!queued)setProfiles({});}
+      finally {
+        clearTimeout(timeout);controller=null;inFlight=false;
+        if(queued) {queued=false;void refresh();}
+      }
+    };
+    const start=()=>{if(timer)clearInterval(timer);timer=setInterval(()=>void refresh(),10000);void refresh(true);};
+    const focus=()=>void refresh(true);
+    start();
+    const {data:auth}=client.auth.onAuthStateChange((_event,session)=>{
+      if(!session || session.user.id!==userId || session.user.is_anonymous || !session.user.email_confirmed_at) {
+        paused=true;generation++;queued=false;controller?.abort();clearInterval(timer);clearTimeout(wake);setProfiles({});
+      } else if(paused) {paused=false;wake=setTimeout(start,0);}
+    });
+    window.addEventListener('focus',focus);window.addEventListener('online',focus);document.addEventListener('visibilitychange',focus);
+    return ()=>{active=false;generation++;controller?.abort();clearInterval(timer);clearTimeout(wake);auth.subscription.unsubscribe();window.removeEventListener('focus',focus);window.removeEventListener('online',focus);document.removeEventListener('visibilitychange',focus);};
+  }, [userId]);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [comments, setComments] = useState<Comment[]>([]);
   const [loading, setLoading] = useState(true);

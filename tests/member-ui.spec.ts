@@ -1,4 +1,119 @@
 import { test, expect } from '@playwright/test';
+import sharp from 'sharp';
+const makePng=()=>sharp({create:{width:8,height:8,channels:3,background:'#315c48'}}).png().toBuffer();
+test.beforeEach(async({request})=>{await request.post('http://127.0.0.1:55433/__control',{data:{reset:true}});});
+
+test('현재 작성자·기존 기록 fallback과 10초 갱신·읽기 실패 복구',async({page,request})=>{
+  await page.clock.install();
+  await request.post('http://127.0.0.1:55433/__control',{data:{seed:true}});
+  await page.goto('/auth/confirm?token_hash=valid-signup&type=signup');
+  await expect(page.locator('.entry-card')).toHaveCount(2);
+  await expect(page.locator('.entry-card').filter({hasText:'테스트 회원'})).toBeVisible();
+  await expect(page.locator('.entry-card').filter({hasText:'이전 방문자'})).toBeVisible();
+  await page.locator('.entry-card').filter({hasText:'테스트 회원'}).click();
+  await expect(page.locator('.detail-meta')).toContainText('테스트 회원');
+  await expect(page.locator('.comments')).toContainText('다른 회원');
+  await expect(page.locator('.comments')).toContainText('이전 댓글 이름');
+  await request.post('http://127.0.0.1:55433/__control',{data:{profile:{nickname:'갱신된 작성자'}}});
+  await page.clock.fastForward(10001);
+  await expect(page.locator('.detail-meta')).toContainText('갱신된 작성자');
+  await request.post('http://127.0.0.1:55433/__control',{data:{readFail:true}});
+  await page.clock.fastForward(10001);
+  await expect(page.locator('.detail-meta')).toContainText('이전 방문자');
+  await expect(page.locator('.comments')).toContainText('다른 회원 댓글');
+  await request.post('http://127.0.0.1:55433/__control',{data:{readFail:false,profile:{nickname:'복구된 작성자'}}});
+  await page.evaluate(()=>window.dispatchEvent(new Event('online')));
+  await expect(page.locator('.detail-meta')).toContainText('복구된 작성자');
+});
+
+test('최악 조회 위상과 지연 응답에서도 30초 내 사진 표시·로그아웃 정리',async({page,request})=>{
+  test.setTimeout(60000);
+  await page.clock.install();
+  await page.goto('/auth/confirm?token_hash=valid-signup&type=signup');await page.goto('/profile');
+  await page.getByLabel('프로필 사진',{exact:true}).setInputFiles({name:'avatar.png',mimeType:'image/png',buffer:await makePng()});
+  await page.getByRole('button',{name:'프로필 저장',exact:true}).click();await expect(page.getByRole('status')).toContainText('저장했습니다');
+  await request.post('http://127.0.0.1:55433/__control',{data:{seed:true}});
+  await page.goto('/');await expect(page.locator('.entry-card .avatar img')).toBeVisible();
+  // Capture an old response, then commit just after the request started.
+  await request.post('http://127.0.0.1:55433/__control',{data:{readDelay:1500}});
+  const response=page.waitForResponse(r=>r.url().includes('/rest/v1/profiles?')&&r.request().method()==='GET');
+  const started=page.waitForRequest(r=>r.url().includes('/rest/v1/profiles?')&&r.method()==='GET');
+  await page.clock.fastForward(10001);
+  await started;
+  await request.post('http://127.0.0.1:55433/__control',{data:{profile:{nickname:'지연 후 최신'}}});
+  const savedAt=await page.evaluate(()=>Date.now());
+  await response;
+  await page.clock.fastForward(10001);
+  await expect(page.locator('.account-name')).toHaveText('지연 후 최신',{timeout:10000});
+  await expect(page.locator('.entry-card .avatar img')).toBeVisible();
+  expect(await page.evaluate(()=>Date.now())-savedAt).toBeLessThanOrEqual(30000);
+  await page.evaluate(()=>{window.dispatchEvent(new Event('focus'));window.dispatchEvent(new Event('focus'));});
+  await expect.poll(async()=> (await (await request.get('http://127.0.0.1:55433/__control')).json()).maxConcurrentReads).toBe(1);
+  await request.post('http://127.0.0.1:55433/__control',{data:{readDelay:0}});
+  const before=await (await request.get('http://127.0.0.1:55433/__control')).json();
+  await page.clock.fastForward(240001);
+  await expect.poll(async()=> (await (await request.get('http://127.0.0.1:55433/__control')).json()).signCount).toBeGreaterThan(before.signCount);
+  await page.getByRole('button',{name:'로그아웃',exact:true}).click();await expect(page).toHaveURL('/login');
+  const stopped=await (await request.get('http://127.0.0.1:55433/__control')).json();
+  await page.clock.fastForward(300001);
+  expect((await (await request.get('http://127.0.0.1:55433/__control')).json()).signCount).toBe(stopped.signCount);
+});
+
+test('동일 회원 충돌은 입력을 보존하고 명시 확인 후에만 다시 저장한다',async({page,context,request})=>{
+  await page.goto('/auth/confirm?token_hash=valid-signup&type=signup');
+  await page.goto('/profile');
+  const second=await context.newPage(); await second.goto('/profile');
+  await page.getByLabel('닉네임',{exact:true}).fill('먼저 저장');
+  await second.getByLabel('닉네임',{exact:true}).fill('보존할 초안');
+  await page.getByRole('button',{name:'프로필 저장',exact:true}).click();
+  await expect(page.getByRole('status')).toContainText('저장했습니다');
+  await second.getByRole('button',{name:'프로필 저장',exact:true}).click();
+  await expect(second.locator('.profile-page form [role=alert]')).toContainText('다른 창');
+  for(const width of [390,1440]) {await second.setViewportSize({width,height:900});expect(await second.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);}
+  await second.screenshot({path:'artifacts/profile-conflict-desktop.png',fullPage:true});
+  await second.setViewportSize({width:390,height:844});await second.screenshot({path:'artifacts/profile-conflict-mobile.png',fullPage:true});
+  await expect(second.getByLabel('닉네임',{exact:true})).toHaveValue('보존할 초안');
+  await expect(second.getByRole('button',{name:'프로필 저장',exact:true})).toBeDisabled();
+  await request.post('http://127.0.0.1:55433/__control',{data:{readFail:true}});
+  await second.getByRole('button',{name:'최신 정보 불러오기'}).click();
+  await expect(second.locator('.profile-page form [role=alert]')).toContainText('불러오지');
+  await expect(second.getByRole('button',{name:'프로필 저장',exact:true})).toBeDisabled();
+  await request.post('http://127.0.0.1:55433/__control',{data:{readFail:false}});
+  await second.getByRole('button',{name:'최신 정보 불러오기'}).click();
+  await expect(second.locator('.latest-profile')).toContainText('먼저 저장');
+  await expect(second.getByRole('button',{name:'프로필 저장',exact:true})).toBeDisabled();
+  await second.getByRole('button',{name:'확인 후 계속 편집'}).click();
+  await expect(second.getByLabel('닉네임',{exact:true})).toHaveValue('보존할 초안');
+  await request.post('http://127.0.0.1:55433/__control',{data:{profile:{nickname:'다시 변경'}}});
+  await second.getByRole('button',{name:'프로필 저장',exact:true}).click();
+  await expect(second.locator('.profile-page form [role=alert]')).toContainText('다른 창');
+  await second.getByRole('button',{name:'최신 정보 불러오기'}).click();
+  await second.getByRole('button',{name:'확인 후 계속 편집'}).click();
+  await second.getByRole('button',{name:'프로필 저장',exact:true}).click();
+  await expect(second.getByRole('status')).toContainText('저장했습니다');
+  await second.reload(); await expect(second.getByLabel('닉네임',{exact:true})).toHaveValue('보존할 초안');
+});
+
+test('이름 경계와 세션 교체를 검증하고 키보드로 저장한다',async({page,request})=>{
+  await page.goto('/auth/confirm?token_hash=valid-signup&type=signup'); await page.goto('/profile');
+  const name=page.getByLabel('닉네임',{exact:true});
+  for(const invalid of ['   ','가'.repeat(21),'다른 회원']) {
+    await name.fill(invalid); await page.getByRole('button',{name:'프로필 저장',exact:true}).click();
+    await expect(page.locator('.profile-page form [role=alert]')).toBeVisible(); await expect(name).toHaveValue(invalid);
+  }
+  for(const valid of [' 가 ','😀'.repeat(20),'테스트 회원','테스트 회원']) {
+    await name.fill(valid); await page.getByRole('button',{name:'프로필 저장',exact:true}).click();
+    await expect(page.getByRole('status')).toContainText('저장했습니다');
+  }
+  await name.fill('다른 계정 금지');
+  await request.post('http://127.0.0.1:55433/__control',{data:{otherAccount:true}});
+  await page.getByRole('button',{name:'프로필 저장',exact:true}).click();
+  await expect(page.locator('.profile-page form [role=alert]')).toContainText('로그인'); await expect(name).toHaveValue('다른 계정 금지');
+  await request.post('http://127.0.0.1:55433/__control',{data:{otherAccount:false}});
+  await page.getByRole('button',{name:'프로필 저장',exact:true}).focus(); await page.keyboard.press('Enter');
+  await expect(page.getByRole('status')).toContainText('저장했습니다');
+  for(const width of [390,1440]) {await page.setViewportSize({width,height:900});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);}
+});
 test('프로필 편집, 중복 실패 보존, 사진 업로드와 모바일 화면 (HTTP fixture)', async ({page,request}) => {
   await page.goto('/auth/confirm?token_hash=valid-signup&type=signup');
   await page.locator('a[href="/profile"]').click();
@@ -9,7 +124,7 @@ test('프로필 편집, 중복 실패 보존, 사진 업로드와 모바일 화�
   await expect(page.locator('.profile-page form [role="alert"]')).toContainText('이미 사용 중');
   await expect(page.getByLabel('닉네임',{exact:true})).toHaveValue('새 프로필');
   await request.post('http://127.0.0.1:55433/__control',{data:{failProfile:false}});
-  const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aF1sAAAAASUVORK5CYII=','base64');
+  const png=await makePng();
   await page.getByLabel('프로필 사진',{exact:true}).setInputFiles({name:'avatar.png',mimeType:'image/png',buffer:png});
   await page.getByRole('button',{name:'프로필 저장'}).click();
   await expect(page.getByRole('status')).toContainText('저장했습니다');
@@ -25,6 +140,41 @@ test('프로필 편집, 중복 실패 보존, 사진 업로드와 모바일 화�
   await page.goto('/profile'); await page.getByLabel('닉네임',{exact:true}).fill('테스트 회원');
   await page.getByRole('button',{name:'프로필 저장'}).click();
   await expect(page.getByRole('status')).toContainText('저장했습니다');
+});
+test('사진 저장 장애·응답 유실·충돌에서 파일을 보존하고 부분 오류를 구분한다',async({page,request,context})=>{
+  await page.goto('/auth/confirm?token_hash=valid-signup&type=signup');await page.goto('/profile');
+  const input=page.getByLabel('프로필 사진',{exact:true});
+  const name=page.getByLabel('닉네임',{exact:true});
+  const save=page.getByRole('button',{name:'프로필 저장',exact:true});
+  const png=await makePng();
+  await input.setInputFiles({name:'broken.png',mimeType:'image/png',buffer:png.subarray(0,45)});
+  await save.click();await expect(page.locator('.profile-page form [role=alert]')).toContainText('이미지');
+  expect((await (await request.get('http://127.0.0.1:55433/__control')).json()).saveCount).toBe(0);
+  await input.setInputFiles({name:'valid.png',mimeType:'image/png',buffer:png});await name.fill('사진 초안');
+  for(const fault of ['uploadFail','dbReject','expired']) {
+    await request.post('http://127.0.0.1:55433/__control',{data:{[fault]:true}});
+    await save.click();await expect(page.locator('.profile-page form [role=alert]')).toBeVisible();await expect(save).toBeEnabled();
+    await expect(name).toHaveValue('사진 초안');expect(await input.evaluate((e:HTMLInputElement)=>e.files?.[0]?.name)).toBe('valid.png');
+    await request.post('http://127.0.0.1:55433/__control',{data:{[fault]:false}});
+  }
+  await request.post('http://127.0.0.1:55433/__control',{data:{profile:{nickname:'타 창 변경'}}});
+  await save.click();await expect(save).toBeDisabled();expect(await input.evaluate((e:HTMLInputElement)=>e.files?.[0]?.name)).toBe('valid.png');
+  await page.getByRole('button',{name:'최신 정보 불러오기'}).click();await page.getByRole('button',{name:'확인 후 계속 편집'}).click();
+  await request.post('http://127.0.0.1:55433/__control',{data:{outcomeUnknown:true}});
+  await save.click();await expect(page.locator('.profile-page form [role=alert]')).toContainText('저장 결과');await expect(save).toBeDisabled();
+  const unknown=await (await request.get('http://127.0.0.1:55433/__control')).json();expect(unknown.images).toContain('profile-avatars/'+unknown.profile.avatar_path);
+  expect(await input.evaluate((e:HTMLInputElement)=>e.files?.[0]?.name)).toBe('valid.png');
+  await request.post('http://127.0.0.1:55433/__control',{data:{outcomeUnknown:false}});
+  await page.getByRole('button',{name:'최신 정보 불러오기'}).click();await page.getByRole('button',{name:'확인 후 계속 편집'}).click();
+  await request.post('http://127.0.0.1:55433/__control',{data:{signFail:true,deleteFail:true,saveDelay:400}});
+  const before=await (await request.get('http://127.0.0.1:55433/__control')).json();
+  await save.dblclick();await expect(page.getByRole('status')).toContainText('저장은 완료');
+  const after=await (await request.get('http://127.0.0.1:55433/__control')).json();expect(after.saveCount-before.saveCount).toBe(1);
+  expect(await input.evaluate((e:HTMLInputElement)=>e.files?.length)).toBe(0);expect(after.images).toContain('profile-avatars/'+after.profile.avatar_path);
+  await request.post('http://127.0.0.1:55433/__control',{data:{signFail:false,deleteFail:false,saveDelay:0}});
+  await page.reload();await expect(name).toHaveValue('사진 초안');await expect(page.locator('.profile-preview img')).toBeVisible();
+  // A new page may load the latest revision without changing the existing draft.
+  const other=await context.newPage();await other.goto('/profile');await expect(other.getByLabel('닉네임',{exact:true})).toHaveValue('사진 초안');
 });
 test('쿠키 로그인·회원 글/댓글 저장·실패 보존·로그아웃 (로컬 계약 fixture)', async ({page,request})=>{
   await page.goto('/login?next=/write');
