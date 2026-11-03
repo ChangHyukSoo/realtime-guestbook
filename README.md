@@ -95,3 +95,31 @@ PGlite 검증은 실제 PostgreSQL 정책·트리거의 로컬 실행이며 Auth
 새 환경에서는 기존 회원 마이그레이션 이후 `supabase/migrations/202610280001_user_profile.sql`을 적용합니다. 기존 닉네임의 대소문자/앞뒤 공백을 제외한 중복이 있으면 먼저 검토해 해결해야 합니다. 현재 연결된 원격 프로젝트에는 Supabase MCP로 적용했습니다. 이미 적용한 SQL을 다시 실행하지 마세요.
 
 검증: `node tests/member-policies.mjs`, `npx playwright test --config playwright.member.config.ts`, `npx playwright test`, `npm run typecheck`, `npm run build`. 앞의 DB/회원 UI 테스트는 로컬 fixture이며 원격 Auth/Storage 통합 검증과 구분합니다.
+## 프로필 revision 전환 (2026-11-02)
+
+프로필은 요청별 회원 인증 → 서버 전체 이미지 디코딩 → 서버 전용 업로드 → revision 비교 RPC 순서로 저장합니다. 서버 환경에 `SUPABASE_SERVICE_ROLE_KEY`가 필요하며 `src/lib/supabase/admin.ts`만 이를 읽습니다. `NEXT_PUBLIC_` 접두사나 브라우저 코드에 키를 넣지 마세요. 공개 설정과 서버 키의 빈 예시는 `.env.example`을 참고하세요.
+
+같은 회원이 두 창에서 편집하면 먼저 저장한 변경을 유지하고 나중 저장을 전체 거부합니다. 입력·선택 파일을 보존하며 ‘최신 정보 불러오기’와 ‘확인 후 계속 편집’을 거친 뒤 별도로 저장합니다. 응답이 유실되어 commit 여부가 불확실한 경우에도 확인 전 자동 재제출하지 않습니다. URL 발급·이전 사진 정리 실패는 저장 성공과 구분합니다.
+
+기존 DB에는 `supabase/migrations/202611020001_profile_revision.sql`과 호환 앱을 쓰기 중지 창에서 함께 전환해야 합니다. 먼저 Supabase MCP/CLI로 실제 이력·schema/grants/RLS/RPC/버킷을 확인하고 백업·staging 검증을 완료하세요. 회원 직접 RPC/프로필 UPDATE/아바타 Storage 쓰기는 차단되므로 구버전 폼은 실패합니다. 복구 시 maintenance를 유지하고 호환 앱을 수정 배포하며 권한 재부여를 자동 원복으로 사용하지 않습니다. 상세 순서와 실제 계정 검증은 `specs/001-user-profile/quickstart.md`에 있습니다. 원격 적용·실제 통합 검증 상태는 `memory-bank/progress.md`를 따릅니다.
+
+사진은 PNG/JPEG/WebP 최대 5MiB, 전체 프레임 디코딩 최대 16,777,216 입력 픽셀·5초입니다. 서명 URL은 300초, 갱신은 240초이며 로그아웃은 메모리 URL/갱신을 정리합니다. 이미 발급한 URL의 즉시 폐기는 보장하지 않습니다. 활성 프로필은 10초 조회·focus 즉시 갱신하며 전체 조회/URL/사진 로딩 10초 이내 조건에서 저장 후 30초 내 표시를 검증합니다.
+
+로컬 검증:
+
+```powershell
+node tests/member-policies.mjs
+node tests/profile-image.test.mjs
+npx playwright test --config playwright.member.config.ts
+npx playwright test
+npm run typecheck
+npm run build
+git diff --check
+```
+
+HTTP fixture/PGlite는 실제 JWT·Storage·독립 DB 세션의 잠금이나 사용자 평가를 대체하지 않습니다.
+
+
+## Hosted development transition (2026-11-03)
+
+Profile revision/RPC migration 202611020001 is applied after pre-change SQL backups and a rollback-only remote rehearsal. All 11 real-account integration checks passed. Rerun instructions and verification scope: specs/001-user-profile/quickstart.md. Current evidence: memory-bank/progress.md. Five-person usability evaluation remains pending.
